@@ -1,0 +1,7 @@
+New release on http://fex.belwue.de/fex.html
+
+Important changes:
+
+- new fex.ph config variable $purge
+
+- fixed various bugs

@@ -1,0 +1,39 @@
+#!/usr/bin/perl -w
+
+$user = $ENV{USER};
+$authid = $ENV{ID};
+$url = "$ENV{PROTO}://$ENV{HTTP_HOST}";
+$fi = 'fexitinstaller.cmd';
+$id = '%USERPROFILE%\\fex\\id';
+$fe = 'http://fex.belwue.de/download/fexit.exe';
+$fx = '%USERPROFILE%\\Desktop\\fexit.exe';
+$ps = '%SystemRoot%\system32\WindowsPowerShell\v1.0\powershell.exe';
+$cmd = <<EOD;
+  mkdir "%USERPROFILE%\\fex"
+  if not exist "$id" (
+    echo $url>"$id"
+    echo $user>>"$id"
+    echo $authid>>"$id"
+  )
+  $ps -command "& { (New-Object Net.WebClient).DownloadFile('$fe','$fx') }"
+  setx PATH "%PATH%;%USERPROFILE%\\Desktop"
+  \@echo.
+  \@set /p x="See fexit on Desktop."
+EOD
+#  \@explorer "%USERPROFILE%\\Desktop"
+$cmd =~ s/^  //gm;
+$cmd =~ s/\n/\r\n/g;
+
+if (chdir "$::spooldir/$user" and open $fi,'>',$fi) {
+  print {$fi} $cmd;
+  close $fi;
+  system "$::FEXHOME/bin/fexsend ".
+         "-oKq -C 'fexit for your Windows desktop' $fi $user >/dev/null 2>&1";
+  if ($? == 0) {
+    print "<p>\n";
+    print "<h3>A fexit installer has been sent to you. Check your email.</h3>\n";
+  }
+  unlink $fi;
+}
+
+return '';

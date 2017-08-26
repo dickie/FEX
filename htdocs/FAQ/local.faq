@@ -1,0 +1,7 @@
+Q: How can I use my own local FAQ?
+A: Put your FAQ into file /home/fex/htdocs/FAQ/local.faq and execute:
+
+   <code>
+   cd /home/fex/htdocs/FAQ
+   ln -sf local.html index.html
+   </code>

@@ -1,0 +1,652 @@
+#!/usr/bin/perl -w
+#
+# l / ll / lf / llf -  better replacement of the classic ls command
+#
+# Author: Ulli Horlacher <framstag@rus.uni-stuttgart.de>
+#
+# Perl Artistic License
+
+use Cwd qw'abs_path';
+use File::Basename;
+use Getopt::Std;
+
+# the name of the game
+$0 =~ s:.*/::;
+
+$ENV{LC_ALL} = 'C';
+
+# unshift @ARGV,split /\s+/,$ENV{'l_opt'} if $ENV{'l_opt'};
+
+@ARGV = grep { chomp } <STDIN> if "@ARGV" eq '-';
+
+# parse CLI arguments
+$opt_l = $opt_i = $opt_t = $opt_s = $opt_a = $opt_r = $opt_d = $opt_n = 0;
+$opt_L = $opt_N = $opt_c = $opt_u = $opt_S = $opt_R = $opt_z = $opt_h = 0;
+$opt_U = $opt_x = $opt_E = 0;
+${'opt_*'} = 0;
+$opt_m = $opt_f = $opt_F = $opt_D = '';
+getopts('hdnlLNitcuarsxUSREz*m:f:D:F:') or usage(1);
+usage(0) if $opt_h;
+$opt_z = 1 unless $opt_R;
+$opt_l = 1                            if $0 eq 'll';
+$opt_l = $opt_i = $opt_a = $opt_S = 1 if $0 eq 'lll';
+&examples if $opt_E;
+if ($0 eq 'lf' or $0 eq 'llf') {
+  $opt_l = $0 eq 'llf';
+  if (scalar(@ARGV) == 0) {
+    die usage(1);
+  } elsif (scalar(@ARGV) == 1) {
+    $opt_F = shift;
+    $opt_R = $opt_F if $opt_F eq '.';
+  } elsif (-d $ARGV[-1]) {
+    $opt_R = pop(@ARGV);
+    $opt_F = join('|',@ARGV);
+  } else {
+    $opt_F = join('|',@ARGV);
+  }
+  @ARGV = ();
+  @ARGV = ($opt_R) if -d $opt_R;
+}
+
+$postsort = $opt_t||$opt_s;
+$postproc = $postsort||$opt_z;
+
+# mark for squeeze operation
+$z = $opt_z ? "\0" : '';
+
+# default sorting methode
+if    ($opt_U) { $lcsort = sub { return @_ } }
+elsif ($opt_r) { $lcsort = sub { sort { lc $b cmp lc $a } @_ } }
+else           { $lcsort = sub { sort { lc $a cmp lc $b } @_ } }
+
+# default: list only files not beginning with a dot
+unless ($opt_m) {
+  if ($opt_a) { $opt_m = '.' }
+  else        { $opt_m = '^[^\.]' }
+}
+
+$older = $newer = 0;
+
+if ($opt_D) {
+  if ($opt_D =~ /:(\d+)([mhd])/) {
+    $older = $1;
+    my $z = $2 || 's';
+    if    ($z =~ /m/) { $older *= 60 }
+    elsif ($z =~ /h/) { $older *= 60*60 }
+    elsif ($z =~ /d/) { $older *= 60*60*24 }
+  } elsif ($opt_D =~ /:(\d\d\d\d-\d\d-\d\d)$/) {
+    $older = $1;
+  }
+  if ($opt_D =~ /(\d+)([mhd]):/) {
+    $newer = $1;
+    my $z = $2 || 's';
+    if    ($z =~ /m/) { $newer *= 60 }
+    elsif ($z =~ /h/) { $newer *= 60*60 }
+    elsif ($z =~ /d/) { $newer *= 60*60*24 }
+  } elsif ($opt_D =~ /^(\d\d\d\d-\d\d-\d\d):/) {
+    $newer = $1;
+  }
+}
+
+# preselect date field number
+if    ($opt_c) { $sdf = 'c' }
+elsif ($opt_u) { $sdf = 'a' }
+else           { $sdf = 'm' }
+
+# any arguments?
+if (@ARGV) { @ARGV = &$lcsort(@ARGV) }
+else       { @ARGV = &getfiles('.') }
+
+# build files list
+&collect(@ARGV);
+
+# post process files list?
+# remark: if no postprocessing, files list has been already printed in list()
+if (@LIST && $postproc) {
+
+  # on -t or -s option sort list on date or size
+  # and then strip of leading sorting pre-string
+  @LIST = grep { s/.{21}// } reverse sort @LIST if $postsort;
+
+  # squeeze size field (= remove unnecessary spaces)
+  if ($opt_z and not $opt_f) {
+    $opt_z = '%'.$opt_z.'s ';
+    @LIST = grep { s/\0 *([,\d\.\-]+) /sprintf($opt_z,$1)/e } @LIST;
+  }
+
+  @LIST = reverse @LIST if $opt_r;
+
+  if (not ($opt_t or $opt_U) and grep /^d[rR-][wW-][xX-]/,@LIST) {
+    foreach (@LIST) { print if /^d/ }
+    foreach (@LIST) { print unless /^d/ }
+  } else {
+    print @LIST;
+  }
+}
+
+# print statistics summary?
+if ($opt_S && $SS) {
+  print "$SS file(s):";
+  printf " r=%d (%s Bytes)",$SS{'-'},&d3($Ss) if $SS{'-'};
+  delete $SS{'-'};
+  foreach my $type (qw(l d c b p s ?)) {
+    printf " %s=%d",$type,$SS{$type} if $SS{$type};
+    delete $SS{$type};
+  }
+  foreach my $type (keys %SS) { printf " %s=%d",$type,$SS{$type} }
+  print "\n";
+}
+
+exit ($found ? 0 : 1);
+
+
+# collect files and build file lists
+#
+# INPUT: filenames
+#
+# GLOBAL: @LIST
+sub collect {
+  my @files = @_;
+  my $f;
+
+  getacl(@files) if $opt_l and not $opt_n;
+
+  # loop over all argument files/directories
+  foreach $f (@files) {
+
+    # skip jed and emacs backup files
+    # next if $f =~ /~$/ and not $opt_a and not $opt_l;
+
+    # recursive?
+    if ($opt_R) {
+
+      # list single file
+      if ($opt_L) {
+        unless (-e $f) {
+          warn "$0: dangling symlink $f\n";
+          next;
+        }
+        $f = abs_path($f);
+      }
+      list($f);
+
+      # traverse real subdirs
+      if (-d $f and not -l $f) {
+        $f =~ s:/*$:/:;
+        # skip other file systems on -x
+        if ($opt_x) {
+          my @pd = stat(dirname($f));
+          my @sd = stat($f);
+          next if $pd[0] ne $sd[0];
+        }
+        collect(getfiles($f));
+      }
+
+    } else {
+
+      # suppress trailing / on -d option
+      $f =~ s:/$:: if $opt_d;
+
+      # on trailing / list subdirs, too
+      if ($f =~ m:/$:) { list(getfiles($f)) }
+      elsif ($f eq '') { list('/') }
+      else {
+        if ($opt_L) {
+          unless (-e $f) {
+            warn "$0: dangling symlink $f\n";
+            next;
+          }
+          $f = abs_path($f);
+        }
+        list($f);
+      }
+
+    }
+  }
+}
+
+
+# list file(s)
+#
+# INPUT: filenames
+#
+# GLOBAL: @LIST (filenames-list)
+sub list {
+  my @files = @_;
+  my ($file,$line,$linkname,$inode,$links,$size,$mode,$uid,$gid,$date,%dates);
+  my ($day);
+
+  foreach $file (@files) {
+
+    next if $opt_F and not fmatch($file);
+    next if $opt_N and (not -f $file or -l $file);
+
+    # get file information
+    # if ($opt_L and stat $file or not $opt_L and lstat $file) {
+    if (lstat $file) {
+      ($linkname,$inode,$links,$size,$mode,$uid,$gid,$date,%dates) = &info($file);
+    } elsif ($! eq "Permission denied") {
+      $linkname = $file;
+      $inode = $links = $size = $uid = $gid = '?';
+      $mode = $opt_l ? '?---------' : '?---';
+      $date = '????-??-?? ??:??:??';
+      %dates = ('m' => 0, 'a' => 0, 'c' => 0);
+    } else {
+      warn "$0: ".quote($file)." - $!\n";
+      next;
+    }
+
+    $day = $date;
+    $day =~ s/\s.*//;
+
+    if ($older) {
+      next if $older =~ /-/ and $day gt $older;
+      next if $older !~ /-/ and $dates{m} > time-$older;
+    }
+    if ($newer) {
+      next if $newer =~ /-/ and $day lt $newer;
+      next if $newer !~ /-/ and $dates{m} < time-$newer;
+    }
+
+    if (defined $linkname) {
+
+      # prepend sorting string
+      $line = '';
+      $line = sprintf '%21s',$date if $opt_t;
+      $line = sprintf '%21s',$size if $opt_s;
+
+      unless ($opt_n) {
+        $uid = substr($uid,0,8);
+        $gid = substr($gid,0,8);
+      }
+
+      # user defined format?
+      if ($opt_f) {
+        foreach my $i (split '',$opt_f) {
+	  if ($opt_n) {
+	    $i =~ tr/AD/ad/;
+	    if    ($i eq 'm') { $line .= sprintf '%06o ',  $mode }
+	    elsif ($i eq 'u') { $line .= sprintf '%6d ',   $uid }
+	    elsif ($i eq 'g') { $line .= sprintf '%6d ',   $gid }
+	    elsif ($i eq 's') { $line .= sprintf "$z%16s ",$size }
+	    elsif ($i eq 'l') { $line .= sprintf '%3s ',   $links }
+	    elsif ($i eq 'i') { $line .= sprintf '%14s ',  $inode }
+	    elsif ($i eq 'd') { $line .= sprintf '%10s ',  $date }
+	    elsif ($i eq 'a') { $line .= sprintf '%10s %10s %10s ',
+	                                 $dates{'a'},$dates{'m'},$dates{'c'} }
+	  } else {
+            # $mode =~ s/(....)(...)/sprintf($1.uc($2))/e if $ACL{$file};
+            substr($mode,4,3) = uc(substr($mode,4,3)) if $ACL{$file};
+	    if    ($i eq 'm') { $line .= $mode.' ' }
+	    elsif ($i eq 'u') { $line .= sprintf '%-8s ',  $uid }
+	    elsif ($i eq 'g') { $line .= sprintf '%-8s ',  $gid }
+	    elsif ($i eq 's') { $line .= sprintf "$z%19s ",$size }
+	    elsif ($i eq 'l') { $line .= sprintf '%3s ',   $links }
+	    elsif ($i eq 'i') { $line .= sprintf '%14s ',  $inode }
+	    elsif ($i eq 'd') { $line .= $date.' ' }
+	    elsif ($i eq 'D') { $line .= $date.' ' }
+	    elsif ($i eq 'a') { $line .= &isodate($dates{'a'}).' '.
+	                                 &isodate($dates{'m'}).' '.
+	                                 &isodate($dates{'c'}).' ' }
+	    elsif ($i eq 'A') { $line .= &isodate($dates{'a'}).' '.
+	                                 &isodate($dates{'m'}).' '.
+	                                 &isodate($dates{'c'}).' ' }
+	  }
+	}
+
+      # predefined formats
+      } else {
+
+	if ($opt_n) {
+          if ($opt_l) {
+            $line .= sprintf "%06o %6d %6d $z%15s %10d ",
+	                     $mode,$uid,$gid,$size,$date;
+          } else {
+            $line .= sprintf "%06o $z%15s %10d ",$mode,$size,$date;
+          }
+	} else {
+          if ($opt_l) {
+            # $mode .= $ACL{$file} ? '+' : ' ';
+            # $mode =~ s/(....)(...)/sprintf($1.uc($2))/e if $ACL{$file};
+            substr($mode,4,3) = uc(substr($mode,4,3)) if $ACL{$file};
+            $line .= sprintf "%s %-8s %-8s $z%19s %s ",
+                             $mode,$uid,$gid,$size,$date;
+          } else {
+            $line .= sprintf "%s $z%19s %s ",$mode,$size,substr($date,0,-3);
+          }
+        }
+
+	if ($opt_i)   { $line .= sprintf '%3s %10s ',$links,$inode }
+      }
+
+      $line .= $linkname."\n";
+
+      if ($postproc) {
+        push @LIST,$line;
+      } else {
+        $line =~ s/\0//;
+        print $line;
+      }
+      $found++;
+
+    } else {
+      lstat $file;
+      warn "$0: cannot get dir-info for ".quote($file)." - $!\n";
+    }
+
+  }
+}
+
+# get file information
+#
+# INPUT: file name
+#
+# OUTPUT: filename with linkname, inode, hard link count, size, mode string,
+#         UID, GID, isodate
+sub info {
+  my $file = shift;
+  my ($linkname,$links,$mode,$bmode,$uid,$gid,$date,%dates,@stat);
+  my $size = '-';
+  my $inode = '?';
+  my @rwx = qw/--- --x -w- -wx r-- r-x rw- rwx/;
+  my $type;
+
+  if ($opt_L) { @stat = stat $file }
+  else        { @stat = lstat $file }
+
+  if (@stat) {
+
+    $inode = $stat[1];
+    $bmode = $stat[2];
+    $links = $stat[3];
+    %dates = ('m' => $stat[9],
+              'a' => $stat[8],
+	      'c' => $stat[10]);
+
+    if ($opt_n) {
+      $uid  = $stat[4];
+      $gid  = $stat[5];
+      $date = $dates{$sdf};
+    } else {
+      $uid  = getpwuid($stat[4]) || $stat[4];
+      $gid  = getgrgid($stat[5]) || $stat[5];
+      $date = &isodate($dates{$sdf});
+    }
+
+    if    (-f _)	    { $type = '-'; $size = $stat[7]; }
+    elsif (!$opt_L && -l _) { $type = 'l'; }
+    elsif (-d _)            { $type = 'd'; }
+    elsif (-c _)            { $type = 'c'; $size = &nodes($stat[6]); }
+    elsif (-b _)            { $type = 'b'; $size = &nodes($stat[6]); }
+    elsif (-p _)            { $type = 'p'; }
+    elsif (-S _)            { $type = 's'; }
+    else                    { $type = '?'; }
+
+    if ($opt_n) {
+      $mode = $stat[2];
+      $size = $stat[7] if $size eq '-';
+    } else {
+      if ($opt_l) {
+        $mode = $rwx[$bmode & 7];
+        $bmode >>= 3;
+        $mode = $rwx[$bmode & 7] . $mode;
+        $bmode >>= 3;
+        $mode = $rwx[$bmode & 7] . $mode;
+        substr($mode,2,1) =~ tr/-x/Ss/ if -u _;
+        substr($mode,5,1) =~ tr/-x/Ss/ if -g _;
+        substr($mode,8,1) =~ tr/-x/Tt/ if -k _;
+        $mode = $type.$mode;
+      } else {
+        # with short list display only effective file access modes
+        use filetest 'access'; # respect ACLs ==> cannot use pseudofile _
+        $mode = $type
+	        . (-r $file ? 'R' : '-')
+                . (-w $file ? 'W' : '-')
+                . (-x $file ? 'X' : '-');
+        substr($mode,2,1) =~ tr/-x/Ss/ if -u $file or -g $file;
+        substr($mode,3,1) =~ tr/-x/Tt/ if -k $file;
+      }
+    }
+
+  # fall back to ls command if perl lstat failed
+  } else {
+    if ($opt_L) {
+      return;
+    } else {
+      ($mode,$links,$uid,$gid,$size) = split /\s+/,`ls -ld $file 2>/dev/null`;
+      return undef unless defined $mode;
+      $type = substr($mode,0,1);
+      # for (my $i=0;$i<3;$i++) { push @dates,'????-??-?? ??:??:??' }
+      # $date = `gfind $dir -maxdepth 1 -name $file -printf '%Ty-%Tm-%Td %TT\n'`;
+    }
+  }
+
+  # summarize statistics
+  if ($opt_S) {
+    $SS++;
+    $SS{$type}++;
+    $Ss += $size if $type eq '-';
+  }
+
+  $size = &d3($size);
+
+  # determine longest size field
+  if ($opt_z) {
+    my $x = length $size;
+    $opt_z = $x if $x>$opt_z;
+  }
+  $linkname = ${'opt_*'} ? $file : quote($file) ;
+  if ($type eq 'l' and $opt_f !~ /n/) {
+    my $link = readlink($file);
+    if (defined $link) {
+      $linkname .= ' -> ' . (${'opt_*'} ? $link : quote($link));
+    }
+  }
+  $mode =~ s/\+$//;
+  #$mode .= ' ' unless $mode =~ /\+$/;
+
+  return ($linkname,$inode,$links,$size,$mode,$uid,$gid,$date,%dates);
+}
+
+# get ACLs
+#
+# INPUT: filenames
+#
+# GLOBAL: @ACL
+sub getacl {
+  my @files;
+
+  $getfacl ||= pathsearch('getfacl') or return;
+  # warn "### @_\n";
+  foreach my $file (@_) { push @files,$file if -e $file }
+  if (@files and open my $acl,'-|',$getfacl,'-ps',@files) {
+    while (<$acl>) {
+      $ACL{$1} = $1 if /^# file: (.+)/;
+    }
+    close $acl;
+  }
+}
+
+
+# reformat integer into 3-digit doted format
+# (when non-numerical mode is set)
+#
+# INPUT: integer or '-'
+#
+# OUTPUT: d3-string
+sub d3 {
+  local $_ = shift;
+  if ($opt_n) { s/-/0/ }
+  else        { while (s/(\d)(\d\d\d\b)/$1,$2/) {} }
+  return $_;
+}
+
+
+# get all files matching pattern $opt_m
+#
+# INPUT: directory to scan
+#
+# OUTPUT: files which match (sorted, directories first)
+sub getfiles {
+  my $dir = shift;
+  my @files = ();
+  my @dirs = ();
+  my $f;
+
+  if (opendir D,$dir) {
+    $dir = '' if $dir eq '.';
+    while (defined($f = readdir D)) {
+
+      # skip . and .. pseudo-subdirs
+      next if $f =~ m:(^|/)\.\.?/*$:;
+      # skip ONTAP snapshot dir
+      next if $f =~ m:(^|/)\.snapshot/*$:;
+
+
+      # skip jed and emacs backup files
+      # next if $f =~ /~$/ and not $opt_a and not $opt_l;
+
+      if ($f =~ /$opt_m/) {
+        my $x = $dir.$f;
+        if (not -l $x and -d $x and not ($opt_R or $postsort or $opt_U)) {
+          push @dirs,$x;
+        } else {
+          push @files,$x;
+        }
+      }
+    }
+    closedir D;
+    unless ($postsort) {
+      @files = &$lcsort(@files);
+      @dirs  = &$lcsort(@dirs);
+    }
+  } else {
+    warn "$0: cannot read $dir : $!\n";
+  }
+
+  getacl(@dirs,@files) if $opt_l and not $opt_n;
+  return (@dirs,@files);
+}
+
+
+# reformat integer to string node
+#
+# INPUT: integer node
+#
+# OUTPUT: string node
+sub nodes {
+  my $rdev = shift;
+  return sprintf("%03d,%03d", ($rdev >> 8) & 255, $rdev & 255);
+}
+
+
+sub pathsearch {
+  my $prg = shift;
+
+  foreach my $dir (split(':',$ENV{PATH})) {
+    return "$dir/$prg" if -x "$dir/$prg";
+  }
+}
+
+
+# reformat timetick to ISO date string
+#
+# INPUT: timetick
+#
+# OUTPUT: ISO date string
+sub isodate {
+  my @d = localtime shift;
+  return sprintf('%d-%02d-%02d %02d:%02d:%02d',
+                 $d[5]+1900,$d[4]+1,$d[3],$d[2],$d[1],$d[0]);
+}
+
+
+# quote file name to printable name and escape shell meta chars
+#
+# INPUT: original file name
+#
+# OUTPUT: printable file name
+sub quote {
+  local $_ = shift;
+  my $mc = '\'\[\]\\\\ `"$?&<>$*()|{};';
+
+  unless (defined $_) {
+    die "@_";
+    @x = caller;
+    die "@x";
+  }
+  if (s/[\000-\037\200-\237\241-\250]/?/g or /\'/) {
+    s/([$mc])/\\$1/g;
+    s/^~/\\~/;
+# } elsif (/[$mc]/ or -d and /:/) {
+  } elsif (/[$mc]/) {
+    $_ = "'$_'";
+  }
+  return $_;
+}
+
+
+sub fmatch {
+  my $file = shift;
+  my $link = readlink($file)||'';
+
+  return $file if basename($file) =~ /$opt_F/i;
+  return $link if basename($link) =~ /$opt_F/i;
+}
+
+
+sub usage {
+  my $status = shift;
+  my $opts = '[-lastcuidnrzLRxNS*] [-f format] [-D X:Y]';
+  local *OUT = $status ? *STDERR : *STDOUT;
+
+  if ($0 ne 'lf') {
+    print OUT "usage: $0 $opts [-F regexp] [file...]\n";
+  }
+  $opts =~ s/R//;
+  print OUT "usage: lf $opts regexp [regexp...] [directory]\n";
+  print OUT <<EOD;
+options: -l  long list (implicit if called 'll')
+         -a  list also .* files
+         -s  sort by size
+         -t  sort by time
+         -U  sort by nothing (original i-node order)
+         -c  list status change time instead of modification time
+         -u  list last access time instead of modification time
+         -i  list also inode and hard links numbers
+         -d  do not list contents of diretories
+         -n  numerical output
+         -r  reverse list
+         -z  squeeze size field (slows down output)
+         -L  show absolute real path (dereference symbolic links)
+         -R  recursive into subdirs
+         -x  do not cross filesystem boundaries with -R
+         -F  find files matching case insensitive regexp
+         -N  show only normal (regular) files
+         -S  print statistics summary at end
+         -*  list plain file names (without \\ masking)
+	 -f  user defined format output, format characters are:
+	     m=mode, u=user, g=group, s=size, l=hard links count, i=inode
+	     n=name only, d=date, a=access+modification+inodechange dates
+         -D  list only files newer than X and older than Y
+             XY format: NUMBER[smhd] (s=seconds, m=minutes, h=hours, d=days)
+             XY format: YYYY-MM-DD (Y=year, M=month, D=day)
+         -E  show examples
+EOD
+  exit $status;
+}
+
+sub examples {
+  print <<EOD;
+l *.c            # list files ending with .c
+l -la            # list all files in long format
+l -Rrs           # list files recursive reverse sorted by size
+l -*f mus        # list files native names with format: mode+user+size
+l -D 10d:        # list files newer than 10 days
+ll               # list files long format (equal to: l -l)
+lll              # list files extra long format (equal to: l -liS)
+lf 'status.*mp3' # list files matching regexp (equal to: l -F 'status.*mp3')
+lf sda1 /dev     # list devices matching sda1 (equal to: l -RF sda1 /dev)
+EOD
+  exit;
+}

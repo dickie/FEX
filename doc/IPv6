@@ -1,0 +1,17 @@
+To enable IPv6 on the server you need:
+
+  - The Perl module Socket6
+    You can install it on Debian or Ubuntu with:
+    apt-get install libsocket6-perl
+
+  - Add to /etc/xinetd.d/fex the line:
+  	flags = IPv6
+    and remove the "bind" option line.
+    Restart xinetd.
+
+
+To enable IPv6 for fexsend, fexget and sexsend you need:
+
+  - The Perl module Net::INET6Glue::INET_is_INET6
+    You can install it on Debian or Ubuntu with:
+    apt-get install libnet-inet6glue-perl

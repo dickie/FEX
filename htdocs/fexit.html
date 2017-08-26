@@ -1,0 +1,83 @@
+<html>
+<head>
+  <title>fexit</title>
+  <style>
+    pre {
+      padding: 8px;
+      background: #eef;
+      border: thin dashed #0076A3;
+      font-family: courier;
+    }
+  </style>
+</head>
+<body>
+
+<<<$ENV{FEXIT} = 'http://fex.belwue.de/download/fexit.exe'>>>
+
+<h1><img src="fex.png"><a href="$FEXIT$">fexit</a> for Windows</h1>
+
+##<<<sleep(12)>>>
+
+#if $ENV{ID}
+<<require "./fexitinstaller">>
+#endif
+<p>
+<a href="$FEXIT$">fexit</a> is a <a href="/index.html">F*EX</a>
+client for sending files of <b>any</b> size to <b>any</b> e-mail address.<br>
+<a href="$FEXIT$">fexit</a> can also send directories or
+download files and resume the upload or download after link failures.<br>
+Your webbrowser cannot do this.
+<p>
+You can start <a href="$FEXIT$">fexit</a> via Windows explorer
+(double-click fexit icon) or via <a href="#cmd">command console (cmd.exe)</a>.
+<br>
+You can also drag files or directories to the fexit icon with the Windows
+explorer.
+<p>
+With <a href="$FEXIT$">fexit</a> you also have access to the
+<a href="http://fex.rus.uni-stuttgart.de/usecases/xx.html">
+F*EX internet clipboard</a>
+to exchange files between your Windows or UNIX accounts.
+<p>
+<a href="$FEXIT$"><img src='fexit.png'></a>
+<p>
+
+#if $ENV{ID}
+<p><hr><p>
+When you run <a href="$FEXIT$">fexit</a> for the first time and you are
+asked for the "F*EX server URL" you can enter your personal URL:
+<p>
+<code>
+<<"$ENV{PROTO}://$ENV{HTTP_HOST}/fup/".::b64("from=$ENV{USER}&id=$ENV{ID}")>>
+</code>
+<p>
+(use your mouse for copy+paste)
+#endif
+
+##<pre><<foreach $v (keys %ENV) { printf "%s=%s\n",$v,$ENV{$v} }>></pre>
+
+<p><hr><p>
+<a name="cmd"><h3>command line usage</h3></a>
+<pre>
+upload usage: fexit [-c "comment"] [-a archive] file(s) recipient[,...]
+example: fexit flupp.avi framstag@rus.uni-stuttgart.de
+example: fexit -c "lab research" -a data *.png x1@flupp.org,x2@flupp.org
+
+download usage: fexit FEX-download-URL
+example: fexit http://fex.rus.uni-stuttgart.de/fop/jHn34yp7/flupp.avi
+
+additional options:
+  -v                               # HTTP verbose output
+  -u fexserver/user@domain:auth-ID # use this server & user
+  -o                               # overwrite file
+  -d                               # delete file
+  -x [files]                       # F*EX clipboard read/write
+  -s [files]                       # SEX read/write yourself
+  -m kBs                           # max kBs throuput
+  -T up-MBs[:down-MBs]             # test internet speed
+  -X "parameter"                   # additional URI parameter
+  -X?                              # show recipients parameter
+</pre>
+
+</body>
+</html>

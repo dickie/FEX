@@ -1,0 +1,4 @@
+#!/bin/sh
+mkdir -p $HOME/backup/spool 2>/dev/null
+cd $HOME/spool
+rsync -aRH --delete --exclude "*/*@*.*" --delete-excluded * $HOME/backup/spool/

@@ -1,0 +1,1042 @@
+#!/usr/bin/perl -w
+#
+# vv : visual versioning
+# zz : generic shell clip board
+# ezz : clip board editor
+#
+# http://fex.rus.uni-stuttgart.de/fstools/vv.html
+# http://fex.rus.uni-stuttgart.de/fstools/zz.html
+#
+# by Ulli Horlacher <framstag@rus.uni-stuttgart.de>
+#
+# Perl Artistic Licence
+#
+# vv is a script to handle file versions:
+# list, view, recover, diff, purge, migrate, save, delete
+#
+# vv is an extension to emacs idea of backup~ files
+#
+# File versions are stored in local subdirectory .versions/
+#
+# To use vv with jed, install to your jed library path:
+#
+#   http://fex.rus.uni-stuttgart.de/sw/share/jedlib/vv.sl
+#
+# To use vv with vim, add to your .vimrc:
+#
+#   autocmd BufWritePre  * execute '! vv -s ' . shellescape(@%)
+#   autocmd BufWritePost * execute '! vv -b ' . shellescape(@%)
+#
+# To use vv with emacs, add to your .emacs:
+#
+#   (add-hook 'before-save-hook (lambda () (shell-command (
+#    concat "vv -s " (shell-quote-argument (buffer-file-name))))))
+#   (add-hook 'after-save-hook  (lambda () (shell-command (
+#    concat "vv -b " (shell-quote-argument (buffer-file-name))))))
+#   (setq make-backup-files nil)
+#
+# To use vv with ANY editor, first set:
+#
+#   export EDITOR=your_favourite_editor
+#   alias ve='vv -e'
+#
+# and then edit your file with:
+#
+#   ve file
+#
+# $HOME/.vvrc is the config file for vv
+
+# 2013-04-15 initial version
+# 2013-04-16 added options -m and -v
+# 2013-04-18 added option -s
+# 2013-04-22 realfilename() fixes symlink problematics
+# 2013-04-22 use rsync instead of cp
+# 2013-04-23 added option -I
+# 2013-04-23 renamed from jedv to vv
+# 2013-04-24 added options -e -0
+# 2013-05-09 added option -R
+# 2013-05-22 modified option -d to double argument
+# 2013-05-22 added vvrc with $exclude and @diff
+# 2013-07-05 fixed bug potential endless loop in rotate()
+# 2014-04-16 added change-file-test for opt_s (needs .versions/$file)
+# 2014-04-18 added option -b : save backup
+# 2014-05-02 fixed bug wrong file ownership when using as root
+# 2014-06-18 options -r -d -v : parameter is optional, default is 1
+# 2014-06-18 fixed (stupid!) bug option -s does only sometimes saving
+# 2014-06-20 options -d -v : argument is optional, default is last file
+# 2014-07-22 fixed bug no (new) backup version 0 on option -r
+# 2014-11-14 added option -D : delete last saved version
+# 2014-11-14 make .versions/ mode 777 if parent directory is world writable
+# 2015-03-19 allow write access by root even if file and .versions/ have different owners
+# 2015-03-20 better error formating for jed
+# 2015-06-02 added option -r . to restore last saved backup
+# 2016-03-07 added options -M -L
+# 2016-03-08 renamed option -I to -H
+# 2016-05-02 added -A option to preserve ACLs with rsync
+# 2016-06-07 option -v : use PAGER=cat if STDOUT is not a tty
+# 2016-06-08 added zz, ezz and installer vvzz
+# 2016-07-06 avoid empty $ZZ versioning
+# 2016-09-12 added option -q quiet mode
+
+use Getopt::Std;
+use File::Basename;
+use Digest::MD5 'md5_hex';
+use Cwd 'abs_path';
+
+$prg = abs_path($0);
+$0 =~ s:.*/::;
+
+$ZZ = $ENV{ZZ} || "$ENV{HOME}/.zz";
+
+&install if $0 eq 'vvzz';
+&zz      if $0 eq 'zz';
+&ezz     if $0 eq 'ezz';
+
+# vv
+$usage = <<EOD;
+usage: $0 [-l] [file]
+       $0 -r . file
+       $0 -r version-number file [new-file]
+       $0 -d version-number[:version-number] file
+       $0 -v version-number file
+       $0 -s file
+       $0 -D file
+       $0 -e file
+       $0 -M file|.
+       $0 -L file|.
+       $0 -m [-R]
+       $0 -p
+       $0 -q
+       $0 -H
+options: -l   list available versions
+         -v   view version
+         -r   recover file (. is last saved backup)
+         -d   show diff
+         -s   save file to new version
+         -D   delete last saved version
+         -e   edit file with \$EDITOR (with versioning)
+         -p   purge orphaned versions (without current file)
+         -q   quiet mode
+         -m   migrate backup files to version files (-R all recursive)
+         -M   migrate to more versions (upto 100)
+         -L   migrate to less versions (upto 10)
+         -H   show more information
+examples: $0 project.pl
+          $0 -d 2 project.pl
+          $0 -r 2 project.pl project_2.pl
+EOD
+
+$vvrc = $ENV{HOME} . '/.vvrc';
+
+$opt_l = 1;
+$opt_h = $opt_p = $opt_m = $opt_s = $opt_0 = $opt_e = $opt_H = $opt_b = 0;
+$opt_q = $opt_D = $opt_R = 0;
+$opt_r = $opt_d = $opt_v = $opt_M = $opt_L = '';
+${'opt_+'} = 0;
+getopts('hHls0bepqmRDrdv+M:L:') or die $usage;
+
+if ($opt_h) {
+  print $usage;
+  exit;
+}
+
+if ($opt_H) {
+  open $prg,$prg or die "$0: $prg - $!\n";
+  $_ = <$prg>;
+  $_ = <$prg>;
+  while (<$prg>) {
+    last if /^\s*$/ or /^#\s*\d\d\d\d-\d\d-\d\d/;
+    print;
+  }
+  exit;
+}
+
+if ($opt_r) {
+  die "usage: $0 -r version-number file\n" unless @ARGV;
+  if ($ARGV[0] =~ /^(\d\d?|\.)$/) { $opt_r = shift }
+  else                            { $opt_r = 1 }
+  die "usage: $0 -r version-number file\n" if scalar @ARGV != 1;
+}
+
+if ($opt_d) {
+  if (@ARGV and $ARGV[0] =~ /^\d\d?(:\d\d?)?$/) { $opt_d = shift }
+  else                                          { $opt_d = 1 }
+  &check_ARGV;
+  die "usage: $0 -d version-number file\n" unless @ARGV;
+}
+
+if ($opt_v) {
+  if (@ARGV and $ARGV[0] =~ /^\d\d?$/) { $opt_v = shift }
+  else                                 { $opt_v = 1 }
+  &check_ARGV;
+  die "usage: $0 -v version-number file\n" unless @ARGV;
+}
+
+if ($0 eq 've' or $opt_e) {
+  $a = pop @ARGV or die $usage;
+  $opt_e = 1;
+} else {
+  $a = shift @ARGV;
+  die $usage if not $opt_r and @ARGV;
+}
+
+unless (-e $vvrc) {
+  open $vvrc,'>',$vvrc or die "$0: cannot write $vvrc - $!\n";
+  print {$vvrc} q{
+$exclude = q(
+  \.tmp$
+  ^mutt-.+-\d+
+  ^#.*#$
+);
+
+@diff = qw'diff -u';
+
+};
+  close $vvrc;
+}
+
+require $vvrc;
+
+if ($a) {
+
+  $file = realfilename($a);
+  $ofile = "$file~";
+  $bfile = basename($file);
+  $dir = dirname($file);
+  $vdir = "$dir/.versions";
+  $vfile = "$vdir/$bfile";
+  $vfile0 = "$vfile~0~";
+  $vfile1 = "$vfile~1~";
+  $vfile01 = "$vfile~01~";
+
+  # change eugid if root and version directory belongs user
+  my @s = stat($vdir);
+  if ($> == 0 and (not @s or $s[4])) {
+    if (my @s = stat($a)) {
+      $) = $s[5];
+      $> = $s[4];
+    }
+  }
+
+  if ($opt_r ne '.' and not ($opt_M or $opt_L)) {
+    if (not -e $file and -s $vfile) {
+      warn "$0: $a does not exist any more\n";
+      print "found $vfile - recover it? ";
+      $_ = <STDIN>;
+      copy($vfile,$file,'.') if /^y/i;
+      exit 0;
+    }
+    die "$0: $a does not exist\n" unless -e $file;
+    die "$0: $a is not a regular file\n" if -l $file or not -f $file;
+  }
+} else {
+  $file = '*';
+  $vdir = ".versions";
+}
+
+if ($opt_M) {
+  if (-d $opt_M and not -l $opt_M) {
+    my $vvv = "$opt_M/.versions";
+    mkdir $vvv;
+    die "$0: cannot mkdir $vvv - $!\n" unless -d $vvv;
+    opendir $vvv,$vvv or die "$0: cannot opendir $vvv - $!\n";
+    while (my $v = readdir($vvv)) {
+      mv100("$opt_M/$1") if -f "$vvv/$v" and $v =~ /(.+)~1~$/;
+    }
+    close $vvv;
+    $vvv .= "/.versions";
+    unless (-d $vvv) {
+      mkdir $vvv or die "$0: cannot mkdir $vvv - $!\n";
+    }
+    $vvv .= "/n";
+    unlink $vvv;
+    symlink 100,$vvv or die "$0: cannot create $vvv - $!\n";
+  } else {
+    die "usage: $0 -M file\n" if @ARGV or $opt_r;
+    mv100($opt_M);
+  }
+  exit;
+}
+
+if ($opt_L) {
+  if (-d $opt_L and not -l $opt_L) {
+    my $vvv = "$opt_L/.versions";
+    mkdir $vvv;
+    die "$0: cannot mkdir $vvv - $!\n" unless -d $vvv;
+    opendir $vvv,$vvv or die "$0: cannot opendir $vvv - $!\n";
+    while (my $v = readdir($vvv)) {
+      mv10("$opt_L/$1") if -f "$vvv/$v" and $v =~ /(.+)~01~$/;
+    }
+    closedir $vvv;
+    $vvv .= "/.versions";
+    unless (-d $vvv) {
+      mkdir $vvv or die "$0: cannot mkdir $vvv - $!\n";
+    }
+    $vvv .= "/n";
+    unlink $vvv;
+    symlink 10,$vvv or die "$0: cannot create $vvv - $!\n";
+  } else {
+    die "usage: $0 -L file\n" if @ARGV or $opt_r;
+    mv10($opt_L);
+  }
+  exit;
+}
+
+if ($opt_e) {
+  die $usage unless $a;
+  $editor = $ENV{EDITOR} or die "$0: environment variable EDITOR not set\n";
+  system(qw'vv -s',$file) if -f $file; # save current version
+  system($editor,@ARGV,$file); exit $? if $?;
+  unlink $ofile;                       # delete new file~ created by editor
+  system(qw'vv -0',$file);             # post rotating
+  system(qw'vv -b',$file);             # save backup
+  exit;
+}
+
+if ($opt_v) {
+  die "$0: no such file $bfile\n" unless $bfile;
+  if (-f "$vfile~0$opt_v~") { $vfile .= "~0$opt_v~" }
+  else                      { $vfile .= "~$opt_v~" }
+  if (-f $vfile) {
+    if (-t STDOUT) {
+      if (($ENV{EDITOR}||$0) =~ /jed/) {
+        $ENV{JEDINIT} = "SAVE_STATE=0";
+        exec 'jed',$vfile,qw'-tmp -f set_readonly(1)';
+      } elsif ($ENV{PAGER}) {
+        exec $ENV{PAGER},$vfile;
+      } else {
+        exec 'view',$vfile;
+      }
+    } else {
+      exec 'cat',$vfile;
+    }
+  } else {
+    die "$0: no $vfile\n";
+  }
+  exit;
+}
+
+if ($opt_p) {
+  opendir $vdir,$vdir or die "$0: no $vdir\n";
+  while ($vfile = readdir($vdir)) {
+    next unless -f "$vdir/$vfile";
+    $bfile = $vfile;
+    $bfile =~ s/~\d\d?~$//;
+    if (not -f $bfile or -l $bfile) {
+      unlink "$vdir/$vfile";
+      $purge{$bfile}++;
+    }
+  }
+  if (@purge = keys %purge) {
+    foreach $p (@purge) {
+      printf "%2d %s~ purged\n",$purge{$p},$p;
+    }
+  }
+  exit;
+}
+
+if ($opt_m) {
+  migrate('.');
+  exit;
+}
+
+if (length($opt_r)) {
+  die "$0: no such file $bfile\n" unless $bfile;
+  if ($opt_r eq '.') {
+    die "$0: no $vfile\n" unless -f $vfile;
+    copy($vfile,$file,$opt_r);
+  } else {
+    if ($opt_r =~ /^\d$/ and -f "$vfile~0$opt_r~") {
+      $vfile .= "~0$opt_r~"
+    } else {
+      $vfile .= "~$opt_r~"
+    }
+    die "$0: no version $opt_r for $file\n" unless -f $vfile;
+    if ($nfile = shift @ARGV) {
+      copy($vfile,$nfile);
+    } else {
+      copy($file,$vfile0) if mtime($file) > mtime($vfile0);
+      copy($vfile,$file);
+    }
+  }
+  exit;
+}
+
+if (length($opt_d)) {
+  die "$0: no such file $bfile\n" unless $bfile;
+  @diff = qw'diff -u' unless @diff;
+  if ($opt_d =~ /^(\d\d?):(\d\d?)$/) {
+    if (-f "$vdir/$bfile~0$1~" and -f "$vdir/$bfile~0$2~") {
+      exec @diff,"$vdir/$bfile~0$2~","$vdir/$bfile~0$1~"
+    } else {
+      exec @diff,"$vdir/$bfile~$2~","$vdir/$bfile~$1~"
+    }
+  } else {
+    if (-f "$vdir/$bfile~0$opt_d~") {
+      exec @diff,"$vdir/$bfile~0$opt_d~",$file;
+    } else {
+      exec @diff,"$vdir/$bfile~$opt_d~",$file;
+    }
+  }
+  exit $!;
+}
+
+if ($opt_s) {
+  die $usage unless $file;
+  if ($exclude) {
+    $exclude =~ s/^\s+//;
+    $exclude =~ s/\s+$//;
+    $exclude =~ s/\s+/|/g;
+    if ($bfile =~ /$exclude/) {
+      warn "\r\n$0: ignoring $bfile\n";
+      exit;
+    }
+  }
+  unless (-d $vdir) {
+    mkdir $vdir or die "$0: cannot mkdir $vdir - $!\n";
+  }
+  chmod 0777,$vdir if (stat $dir)[2] & 00002;
+
+  # migrate old file~ to versions
+  if (-f $ofile and not -l $ofile and -r $ofile) {
+    $vfn = rotate($vfile);
+    rename($ofile,$vfn);
+  }
+
+  # rotate and save if file has changed
+  if (-f $vfile1) {
+    if (md5f($vfile1) ne md5f($file)) {
+      $vfn = rotate($vfile);
+      copy($file,$vfn);
+    }
+    exit;
+  }
+  # rotate and save if file has changed
+  if (-f $vfile01) {
+    if (md5f($vfile01) ne md5f($file)) {
+      $vfn = rotate($vfile);
+      copy($file,$vfn);
+    }
+    exit;
+  }
+  # save new file
+  if ((readlink("$vdir/.versions/n")||10) == 100) {
+    copy($file,$vfile01);
+  } else {
+    copy($file,$vfile1);
+  }
+  exit;
+}
+
+# backup version
+if ($opt_b) {
+  die $usage unless $file;
+  unless (-d $vdir) {
+    mkdir $vdir or die "\r\n$0: cannot mkdir $vdir - $!\n";
+  }
+  copy($file,$vfile);
+  if ($ENV{VIMRUNTIME}) {
+    print "\n";
+  } else {
+    warn "$file --> $vfile\n" unless $opt_q;
+  }
+  exit;
+}
+
+# special post rotating from -e
+if ($opt_0) {
+  my @sb = stat $file or die "$0: $file - $!\n";
+  if (-f $vfile1) {
+    while (my @sv = stat $vfile1) {
+      # no version change?
+      if ($sb[7] == $sv[7] and $sb[9] == $sv[9]) {
+        # rotate back
+        rb10($vfile);
+      } else {
+        last;
+      }
+    }
+  }
+  if (-f $vfile01) {
+    while (my @sv = stat $vfile01) {
+      # no version change?
+      if ($sb[7] == $sv[7] and $sb[9] == $sv[9]) {
+        # rotate back
+        rb10($vfile);
+      } else {
+        last;
+      }
+    }
+  }
+  exit;
+}
+
+# delete last version, roll back
+if ($opt_D) {
+  die "usage: $0 -D file\n" unless $vfile1 or $vfile01;
+  stat $file or die "$0: $file - $!\n";
+  # 0 version?
+  if (-f $vfile0) {
+    unlink $vfile0;
+  } else {
+    # rotate back
+    rb10($vfile) if -f $vfile1;
+    rb100($vfile) if -f $vfile01;
+  }
+  exec $0,'-l',$file;
+  exit;
+}
+
+# default!
+if ($opt_l) {
+  `stty -a` =~ /columns (\d+)/;
+  $tw = ($1 || 80)-36;
+  if (opendir $vdir,$vdir) {
+    while ($vfile = readdir($vdir)) {
+      if (-f "$vdir/$vfile") {
+        if ($bfile) {
+          if ($vfile =~ /^\Q$bfile\E~(\d\d?)~$/) {
+            push @{$v{$file}},$1;
+          }
+        } else {
+          if ($vfile =~ /^(.+)~(\d\d?)~$/) {
+            push @{$v{$1}},$2;
+          } else {
+            push @{$v{$vfile}},0;
+          }
+        }
+      }
+    }
+    closedir $vdir;
+    $ct = '';
+    foreach $file (sort keys %v) {
+      if (not -f $file or -l $file) {
+        warn "$0: orphaned $file~\n";
+        next;
+      }
+      @v = sort @{$v{$file}};
+      if ($bfile) {
+        @stat = stat $file or die "$0: $file - $!\n";
+        print "version bytes        date time";
+        if (${'opt_+'}) {
+          print "     content";
+          $ct = content($file);
+          $ct =~ s/(.{$tw}).+/$1*/;
+        }
+        print "\n";
+        if (length($v[0]) == 1) { $lf = "%s  %10s  %s %s\n" }
+        else                    { $lf = "%2s %10s  %s %s\n" }
+        printf $lf,'.',size($stat[7]),isodate($stat[9]),$ct;
+        foreach $v (@v) {
+          $vfile = "$vdir/$bfile~$v~";
+          @stat = stat $vfile or next;
+          if (${'opt_+'}) {
+            $ct = content($vfile);
+            $ct =~ s/(.{$tw}).+/$1*/;
+          }
+          printf $lf,int($v),size($stat[7]),isodate($stat[9]),$ct;
+        }
+      } else {
+        my $n = scalar(@v);
+        $n-- if $v[0] == 0; # do not count zero version
+        printf "%d %s\n",$n,$file;
+      }
+    }
+  }
+  exit;
+}
+
+
+sub size {
+  my $s = shift;
+  if    ($s > 9999999999) { $s = int($s/2**30).'G' }
+  elsif ($s > 9999999)    { $s = int($s/2**20).'M' }
+  elsif ($s > 9999)       { $s = int($s/2**10).'k' }
+  return $s;
+}
+
+
+sub content {
+  my $file = shift;
+  my $ct;
+  local $_;
+
+  chomp ($ct = `file $file`);
+  $ct =~ s/.*?: //;
+  $ct =~ s/,.*//;
+
+  if ($ct =~ /text/ and open $file,$file) {
+    read $file,$_,1024;
+    close $file;
+    s/[\x00-\x20]+/ /g;
+    s/^ //;
+    s/ $//;
+    $ct = '"'.$_.'"';
+  }
+
+  return $ct;
+}
+
+
+sub isodate {
+  my @d = localtime shift;
+  return sprintf('%d-%02d-%02d %02d:%02d:%02d',
+                 $d[5]+1900,$d[4]+1,$d[3],$d[2],$d[1],$d[0]);
+}
+
+sub rotate {
+  my $vf = shift; # version base file
+  my $vf1 = "$vf~1~";
+  my $vf01 = "$vf~01~";
+  my ($vfi,$vfn);
+
+  if (-f $vf1) {
+    for (my $i = 8; $i >= 0; $i--) {
+      $vfi = sprintf("%s~%d~",$vf,$i);
+      $vfn = sprintf("%s~%d~",$vf,$i+1);
+      if (-e $vfi) {
+        rename $vfi,$vfn or die "$0: $vfi --> $vfn : $!\n";
+      }
+    }
+    # was there a version 0?
+    if (-e $vf1) {
+      my $bf = $vf;
+      $bf =~ s:/\.versions/:/:;
+      my @sb = stat $bf;
+      my @sv = stat $vf1;
+      # version change? (other size or mtime)
+      if (@sb and @sv and $sb[7] == $sv[7] and $sb[9] == $sv[9]) {
+        # same version
+        unlink $vf1;
+      } else {
+        # other version
+        rotate($vf);
+      }
+    }
+    return "$vf~1~";
+  } elsif (-f $vf01) {
+    for (my $i = 98; $i >= 0; $i--) {
+      $vfi = sprintf("%s~%02d~",$vf,$i);
+      $vfn = sprintf("%s~%02d~",$vf,$i+1);
+      if (-e $vfi) {
+        rename $vfi,$vfn or die "$0: $vfi --> $vfn : $!\n";
+      }
+    }
+    # was there a version 0?
+    if (-e $vf01) {
+      my $bf = $vf;
+      $bf =~ s:/\.versions/:/:;
+      my @sb = stat $bf;
+      my @sv = stat $vf01;
+      # version change? (other size or mtime)
+      if (@sb and @sv and $sb[7] == $sv[7] and $sb[9] == $sv[9]) {
+        # same version
+        unlink $vf01;
+      } else {
+        # other version
+        rotate($vf);
+      }
+    }
+    return "$vf~01~";
+  }
+
+  return "$vf~1~";
+}
+
+sub copy {
+  my ($from,$to,$restore) = @_;
+
+  unless ($restore) {
+    if (-l $file or not -f $file) {
+      die "$0: $file is not a regular file\n";
+    }
+  }
+
+  if (open $to,'>>',$to) {
+    close $to;
+    if (system(qw'rsync -aA',$from,$to) == 0) {
+      if ($ENV{VIMRUNTIME}) {
+        print "\n";
+      } else {
+        warn "$from --> $to\n" unless $opt_q;
+      }
+    } else {
+      exit $?;
+    }
+  } else {
+    die "\r\n$0: cannot write $to - $!\n";
+  }
+}
+
+sub realfilename {
+  my $file = shift;
+
+  return $file unless -e $file;
+
+  if (-l $file) {
+    my $link = readlink($file);
+    if ($link !~ /^\// and $file =~ m:(.*/).:) {
+      $link = $1 . $link;
+    }
+    return realfilename($link);
+  } else {
+    return $file;
+  }
+}
+
+sub migrate {
+  my $dir = shift;
+  my $vdir = "$dir/.versions";
+  my $dfile;
+
+  opendir $dir,$dir or die "$0: cannot read directory $dir - $!\n";
+  while ($file = readdir($dir)) {
+    $dfile = "$dir/$file";
+    next if -l $dfile or $file eq '.' or $file eq '..';
+    if (-d $dfile and $opt_R and $file ne '.versions') {
+      migrate($dfile);
+    } elsif (-f $dfile and $file =~ /~$/) {
+      if (-d $vdir) {
+        for ($i = 8; $i > 0; $i--) {
+          $n = $i+1;
+          rename "$vdir/$file$i~","$vdir/$file$n~";
+        }
+      } else {
+        mkdir $vdir or die "$0: cannot mkdir $vdir - $!\n";
+      }
+      $nfile = sprintf("%s/%s1~",$vdir,$file);
+      rename $dfile,$nfile or die "$0: cannot move $dfile to $nfile - $!\n";
+      warn "$dfile --> $nfile\n" unless $opt_q;
+    }
+  }
+  closedir $dir;
+}
+
+sub mtime {
+  my @s = stat shift;
+  return @s ? $s[9] : 0;
+}
+
+sub md5f {
+  my $file = shift;
+  my $md5 = 0;
+  local $/;
+
+  if (open $file,$file) {
+    $md5 = md5_hex(<$file>);
+    close $file;
+  }
+  return $md5;
+}
+
+
+# if ARGV is empty use last saved file as default file argument
+sub check_ARGV {
+  local $_;
+  local *V;
+
+  if (not @ARGV) {
+    if (-d '.versions' and open V,'ls -at .versions|') {
+      while (<V>) {
+        chomp;
+        if (-f) {
+          close V;
+          s/~\d+~$//;
+          @ARGV = ($_);
+          return;
+        }
+      }
+    }
+  }
+
+}
+
+
+sub mv10 {
+  my $file = shift;
+  my $vfile = dirname($file).'/.versions/'.basename($file);
+
+  die "$0: $file has no extended versions\n" unless -f "$vfile~01~";
+  for (my $i=1; $i<10; $i++) {
+    my $vfile1 = "$vfile~$i~";
+    my $vfile2 = "$vfile~0$i~";
+    if (-f $vfile2) {
+      warn "$vfile2 --> $vfile1\n" unless $opt_q;
+      rename $vfile2,$vfile1 or die "$0: $!\n";
+    }
+  }
+  for (my $i=10; $i<100; $i++) {
+    unlink "$vfile~$i~";
+  }
+}
+
+sub mv100 {
+  my $file = shift;
+  my $vfile = dirname($file).'/.versions/'.basename($file);
+
+  die "$0: $file has already extended versions\n" if -f "$vfile~01~";
+  die "$0: $file has no versions\n" unless -f "$vfile~1~";
+  for (my $i=1; $i<10; $i++) {
+    my $vfile1 = "$vfile~$i~";
+    my $vfile2 = "$vfile~0$i~";
+    if (-f $vfile1) {
+      warn "$vfile1 --> $vfile2\n" unless $opt_q;
+      rename $vfile1,$vfile2 or die "$0: $!\n";
+    }
+  }
+}
+
+
+# rotate back
+sub rb10 {
+  my $vfile = shift;
+
+  for (my $i = 1; $i <= 8; $i++) {
+    my $vfi = sprintf("%s~%d~",$vfile,$i);
+    my $vfn = sprintf("%s~%d~",$vfile,$i+1);
+    if (-f $vfn) {
+      rename $vfn,$vfi;
+    } else {
+      unlink $vfi if $i == 1;
+      last;
+    }
+  }
+}
+
+
+# rotate back
+sub rb100 {
+  my $vfile = shift;
+
+  for (my $i = 1; $i <= 98; $i++) {
+    my $vfi = sprintf("%s~%02d~",$vfile,$i);
+    my $vfn = sprintf("%s~%02d~",$vfile,$i+1);
+    if (-f $vfn) {
+      rename $vfn,$vfi;
+    } else {
+      unlink $vfi if $i == 1;
+      last;
+    }
+  }
+}
+
+
+
+sub pathsearch {
+  my $prg = shift;
+
+  foreach my $dir (split(':',$ENV{PATH})) {
+    return "$dir/$prg" if -x "$dir/$prg";
+  }
+}
+
+
+# zz is the generic clip board program
+#
+# to use zz with vim, write to your .vimrc:
+#
+# noremap <silent> zz> :w !zz<CR><CR>
+# noremap <silent> zz< :r !zz --<CR>
+sub zz {
+  my $bs = 2**16;
+  my $wm = '>';
+  my ($file,$tee,$x);
+
+  if ("@ARGV" =~ /^(-h|--help)$/) {
+    print <<'EOD';
+zz is the generic clip board program. It can hold any data, ASCII or binary.
+The clip board itself is $ZZ (default: $HOME/.zz).
+See also the clip board editor "ezz".
+Limitation: zz does not work across accounts or hosts! Use xx instead.
+
+Options and modes are:
+
+  "zz"              show content of $ZZ
+  "zz file(s)"      copy file(s) content into $ZZ
+  "zz -"            write STDIN (keyboard, mouse buffer) to $ZZ
+  "zz +"            add STDIN (keyboard, mouse buffer) to $ZZ
+  "... | zz"        write STDIN from pipe to $ZZ
+  "... | zz +"      add STDIN from pipe to $ZZ
+  "... | zz -"      write STDIN from pipe to $ZZ and STDOUT
+  "zz | ..."        write $ZZ to pipe
+  "... | zz | ..."  save pipe data to $ZZ (like tee)
+  "zz --"           write $ZZ to STDOUT
+  "zz -v"           show clip board versions (history)
+  "zz -1"           write $ZZ version 1 to STDOUT
+  "zz -9"           write $ZZ version 9 to STDOUT
+
+Examples:
+
+  zz *.txt
+  ls -l | zz
+  zz | wc -l
+  (within vi)   :w !zz
+  (within vi)   :r !zz
+  (within mutt) |zz
+EOD
+    exit;
+  }
+
+  if ("@ARGV" eq '-v') {
+    exec qw'vv -+l',$ZZ;
+  }
+
+  if ("@ARGV" =~ /^-(\d)$/) {
+    exec "vv -v $1 '$ZZ' | cat";
+  }
+
+  # read mode
+  if (-t STDIN and not @ARGV or "@ARGV" eq '--') {
+    exec 'cat',$ZZ;
+  }
+
+  # write mode
+  system "vv -s '$ZZ' >/dev/null 2>&1" if -s $ZZ;
+
+  if (@ARGV and $ARGV[0] eq '+') {
+    shift @ARGV;
+    $wm = '>>';
+  }
+
+  if ("@ARGV" eq '-') {
+    @ARGV = ();
+    $tee = 1 unless -t STDIN;
+  }
+
+ $tee = 1 unless @ARGV or -t STDIN or -t STDOUT;
+ $bs = 2**12 if $tee;
+
+  open $ZZ,$wm,$ZZ or die "$0: cannot write $ZZ - $!\n";
+
+  if (@ARGV) {
+    while ($file = shift @ARGV) {
+      if (-f $file) {
+        if (open $file,$file) {
+          while (read($file,$x,$bs)) {
+            my $s = syswrite $ZZ,$x;
+            defined($s) or die "$0: cannot write to $ZZ - $!\n";
+          }
+          close $file;
+        } else {
+          warn "$0: cannot read $file - $!\n";
+        }
+      } elsif (-e $file) {
+        warn "$0: $file is not a regular file\n";
+      } else {
+        warn "$0: $file does not exist\n";
+      }
+    }
+    close $ZZ;
+    $ZZ1 = $ZZ.'~1~';
+    $ZZ1 =~ s:(.*)/(.*):$1/.versions/$2:;
+    if (-e $ZZ and not -s $ZZ and -s $ZZ1 ) {
+      system qw'rsync -aA',$ZZ1,$ZZ;
+    }
+  } else {
+    while (read(STDIN,$x,$bs)) {
+      syswrite $ZZ,$x;
+      syswrite STDOUT,$x if $tee;
+    }
+  }
+
+  exit;
+}
+
+
+sub ezz {
+  my $bs = 2**16;
+  my $wm = '>';
+  my $editor = $ENV{EDITOR} || 'vi';
+  my ($out,$file,$x);
+
+  $ENV{JEDINIT} = "SAVE_STATE=0";
+
+  if ("@ARGV" =~ /^(-h|--help)$/) {
+    print <<'EOD';
+ezz is the edit helper for the zz clip board program.
+The clip board itself is $ZZ (default: $HOME/.zz).
+
+Options and modes are:
+
+  "ezz"                    edit $ZZ with $EDITOR
+  "... | ezz"              write STDIN from pipe to $ZZ and call $EDITOR
+  "... | ezz +"            add STDIN from pipe to $ZZ and call $EDITOR
+  "ezz 'perl commands'"    execute perl commands on $ZZ
+  "ezz - 'perl commands'"  execute perl commands on $ZZ and show result
+  "ezz filter [args]"      run filter [with args] on $ZZ
+  "ezz - filter [args]"    run filter [with args] on $ZZ and show result
+
+Examples:
+
+  ls -l | ezz
+  ezz 's/ /_/g'
+  ezz head -3
+  ezz - head -3
+EOD
+    exit;
+  }
+
+  system "vv -s '$ZZ' >/dev/null 2>&1" if -s $ZZ;
+
+  unless (-t STDIN) {
+    if ("@ARGV" eq '+') {
+      @ARGV = ();
+      $wm = '>>';
+    }
+    open $ZZ,$wm,$ZZ or die "$0: cannot write $ZZ - $!\n";
+    syswrite $ZZ,$x while read(STDIN,$x,$bs);
+    close $ZZ;
+  }
+
+  if (@ARGV) {
+    $out = shift @ARGV if $ARGV[0] eq '-';
+    $cmd = shift @ARGV or exec 'cat',$ZZ;
+    rename $ZZ,"$ZZ~" or die "$0: cannot move $ZZ to $ZZ~ - $!\n";
+    $cmd = quotemeta $cmd;
+    @ARGV = map { quotemeta } @ARGV;
+    if (pathsearch($cmd)) {
+      system "$cmd @ARGV <'$ZZ~'>'$ZZ'";
+    } else {
+      system "perl -pe $cmd @ARGV <'$ZZ~'>'$ZZ'";
+    }
+    if ($? == 0) { unlink "$ZZ~" }
+    else         { rename "$ZZ~",$ZZ }
+    exec 'cat',$ZZ if $out;
+  } else {
+    exec $editor,$ZZ;
+  }
+  exit;
+}
+
+
+sub install {
+  my ($dir);
+  local $| = 1;
+
+  print "Installation directory: ";
+  $dir = <STDIN>||'';
+  chomp $dir;
+  $dir =~ s:/+$::;
+  $dir ||= '.';
+  if ($dir eq '.') {
+    unlink qw'zz ezz vv';
+    link $prg,'zz'   or die "$0: cannot create zz - $!\n";
+    link $prg,'ezz'  or die "$0: cannot create ezz - $!\n";
+    rename $prg,'vv' or die "$0: cannot create vv - $!\n";
+  } else {
+    die "$0: $dir does not exist\n"     unless -e $dir;
+    die "$0: $dir is not a directory\n" unless -d $dir;
+    die "$0: $dir is not writable\n"    unless -w $dir;
+    chdir $dir or die "$0: cannot cd $dir - $!\n";
+    unlink qw'zz ezz vv';
+    system qw'rsync -a',$prg,'vv';
+    exit $? if $?;
+    link 'vv','zz'  or die "$0: cannot create $dir/zz - $!\n";
+    link 'vv','ezz' or die "$0: cannot create $dir/ezz - $!\n";
+  }
+  print "Installation completed. See:\n";
+  print "\t$dir/vv -h\n";
+  print "\t$dir/zz -h\n";
+  print "\t$dir/ezz -h\n";
+  exit;
+}

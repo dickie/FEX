@@ -1,0 +1,350 @@
+#!/usr/bin/perl -w
+#
+# Programname:			fpg - Frams' Perl grep
+# Author: 			framstag@rus.uni-stuttgart.de
+# Licence:			Perl Artistic
+#
+# History:
+#   2003-02-27 Framstag		initial version
+#   2003-02-28 Framstag		added exit status
+#   2007-03-09 Framstag		added option -Q
+#   2007-06-01 Framstag		added options -s and -c
+#                               and changed default output mode
+#   2007-06-03 Framstag		added ReadLine-support
+#   2007-08-31 Framstag		added option -x
+#   2008-02-06 Framstag		added implicit gunzip
+#				-F ==> -R, new -F option
+#   2008-10-07 Framstag		added option -p
+#                               -n ==> -S, new -n option
+#   2008-10-14 Framstag		added option -M
+#   2008-11-23 Framstag		added option -~
+#   2016-06-12 Framstag		option -o respects (match)
+
+use Getopt::Std;
+use Term::ReadLine;
+use locale;
+
+$0 =~ s:.*/::;
+$| = 1;
+
+$usage  = <<EOD;
+usage: $0 [options] 'EXP' [file...]
+   or: $0 [options] -Q file...
+options: -r        recursively scan through directories
+         -i        ignore case
+	 -v        print only lines that do NOT match
+	 -s        verbose scanning/searching
+	 -n        prefix with line number
+	 -l        list filenames only
+	 -L        list filenames only that do NOT match
+	 -p        show paragraphs, not lines (multiline record separator)
+	 -o        show only matched strings (in parenthesis), not whole lines
+	 -M        mail-mode: search and show complete mails from mbox files
+	 -c        print (count) only number of matches (NOT LINES!)
+	 -F        EXP is a string, not a Perl regular expression
+	 -e        EXP is any perl code which returns TRUE/FALSE
+	 -S \#      minimum string length \# for binary files, default: 4
+	 -C \#      \# lines of context
+	 -R 'RS'   record separator, default: newline (\\n) if not set -p
+	 -x 'exp'  extra regexp for highlighting (not used for searching)
+	 -X 'exp'  exclude files (filename matching this regexp) when searching
+         -~        search in backup files *~ #*#, too
+	 -Q        query-loop-prompt for search expression (with readline)
+arguments: EXP     is a Perl regular expression
+           file... can be one or more files, even binary or compressed ones
+EOD
+#examples: $0 -r 'from.*STDIN' *
+#          $0 -e 'length>30 and not /\\w/' script
+#See "perldoc perlre" for help on regular expressions.
+
+
+$maxlen = 0;
+
+$opt_i = $opt_r = $opt_v = $opt_l = $opt_h = $opt_e = $opt_n = $opt_o = 0;
+$opt_s = $opt_c = $opt_Q = $opt_F = $opt_p = $opt_M = $opt_C = $opt_S = 0;
+${'opt_~'} = 0;
+$opt_S = 4;
+$opt_x = $opt_X = '';
+$opt_R = "\n";
+
+getopts('hirvlLFMopscQen~S:R:C:x:X:') or die $usage;
+
+if ($opt_h) {
+  print $usage;
+  exit;
+}
+
+unless ($opt_Q) {
+  $exp = shift or die $usage;
+}
+
+if ($opt_C and ($opt_l or $opt_L or $opt_s or $opt_v or $opt_p or $opt_M)) {
+  die "$0: cannot mix option -C with any of -l -L -s -v -p -M\n";
+}
+
+if ($opt_M and ($opt_l or $opt_L or $opt_s or $opt_v or $opt_p or $opt_C)) {
+  die "$0: cannot mix option -M with any of -l -L -s -v -p -C\n";
+}
+
+if ($opt_o and ($opt_v or $opt_l or $opt_L or $opt_c or $opt_F or $opt_C)) {
+  die "$0: cannot mix option -E with any of -l -L -v -c -C -F\n";
+}
+
+$opt_XX = 0;
+if (not ${'opt_~'}) {
+  @bfiles = grep(/~$|^#.*#$/,@ARGV);
+  if (@bfiles and
+      (grep(/[^~]$/,@ARGV) or grep(/(^|\/)#[^\/]*#$/,@ARGV))) {
+    $opt_XX = 1;
+    warn "$0: ignoring @bfiles\n"; # unless $opt_r;
+  }
+}
+
+if (-t STDOUT) {
+  $B = "\033[1m";
+  $N = "\033[m";
+} else {
+  $B = $N = '';
+}
+
+if ($opt_p) { $/ = '' }
+else        { $/ = $opt_R }
+#else        { eval '$/ = "'.$opt_R.'"' }
+
+$opt_h = 1 if not $opt_r and @ARGV < 2;
+
+if ($opt_Q) {
+  $q = new Term::ReadLine $0;
+  $q->ornaments(0) unless $ENV{PERL_RL};
+  for (;;) {
+    $exp = $q->readline("$B\nsearch-expression:$N ");
+    last unless $exp;
+    &scan;
+  }
+} else {
+  &scan;
+}
+
+exit ($found?0:1);
+
+sub scan {
+  $egrep = '';
+  if ($opt_e) {
+    eval "\$egrep =  sub { $exp }";
+  } else {
+    $exp =~ s/([\@\$\%\^\&\*\(\)\+\[\]\{\}\\\|\.\?])/\\$1/g if $opt_F;
+    $exp = '(?i)'.$exp if $opt_i;
+    $exp = '(?s)'.$exp if $opt_p or $opt_R ne "\n";
+    #? $exp =~ s/\.\*\*/[.\n]*/g;
+  }
+
+  $found = 0;
+
+  if (@ARGV) {
+    foreach $file (@ARGV) {
+      next if $opt_X  and $file =~ /$opt_X/;
+      next if $opt_XX and ($file =~ /~$/ or $file =~ m{(^|/)#[^/]*#$});
+      my $error = ''; open $file,$file or $error = $!; close $file;
+      if ($error) {
+        warn "$0: cannot read file $file - $error\n";
+        next;
+      }
+      unless (-f $file or -d $file or -c $file or -S $file or -p $file) {
+        warn "$0: ignoring special file $file\n";
+        next;
+      }
+      $maxlen = length $file if $maxlen < length $file;
+      # printf "%s\r",substr("scanning $file".(" " x 255),0,$maxlen+9) if -t STDOUT;
+      # print  $B."scanning $file\n".$N if -t STDOUT and not $opt_l||$opt_L;
+      if ($opt_r and -d $file) {
+        $found += grepd($file);
+        next;
+      }
+      # next if -z $file; # Achtung: special files unter /proc sind "empty" !
+      # $type = `file -L $file`;
+      # if ($type =~ /text/i and open F,$file or open F,"strings $file|") {
+      $fileq = quotemeta $file;
+      if (-T $file) {
+        open $file,$file;
+        # warn "$file\n";
+      } else {
+        if ($file =~ /\.bz2$/) {
+          open $file,"bunzip2 <$fileq|";
+          # warn "gunzip <$file|\n";
+        } elsif ($file =~ /\.gz$/) {
+          open $file,"gunzip <$fileq|";
+          # warn "gunzip <$file|\n";
+        } else {
+          open $file,"strings -a -n $opt_S $fileq|";
+          # warn "strings -n $opt_S $file|\n";
+        }
+      }
+      if (fileno $file) {
+        $found += grepf($file,$file);
+        close $file;
+      } else {
+        warn "$0: cannot open $file - $!\n";
+        next;
+      }
+    }
+    # print " " x ($maxlen+9),"\r" if -t STDOUT;
+  } else {
+    $found = grepf(STDIN);
+  }
+}
+
+sub grepd {
+  my $dir = shift;
+  my $file;
+  my $found = 0;
+
+  opendir $dir,$dir or return;
+  while (defined($file = readdir $dir)) {
+    next if $file eq '.' or $file eq '..';
+    if (not ${'opt_~'} and $file =~ /~$|^#[^\/]*#$/) {
+      # warn "$0: ignoring $dir/$file\n";
+      next;
+    }
+    $file = "$dir/$file";
+    next unless -r $file;
+    if (-d $file and not -l $file) {
+      $found += grepd($file);
+      next;
+    }
+    next unless -f $file or -c $file or -S $file or -p $file or -z $file;
+    $fileq = quotemeta $file;
+    if (-T $file and open $file,$file or
+        open $file,"strings -a -n $opt_S $fileq|") {
+      $found += grepf($file,$file);
+      close $file;
+    }
+  }
+  closedir $dir;
+  return $found;
+}
+
+
+sub grepf {
+  my $F = shift;
+  my $file = shift;
+  my $found = 0;
+  my ($n,$l,$c);
+
+  warn $B."scanning $file".$N."\n" if -t STDOUT and $opt_s;
+
+  while (<$F>) {
+    $_ .= "\n" unless /\n$/;
+    if ($opt_M) {
+      if ($mail and (/^From / or eof $F)) {
+        my $__ = $_;
+        $_ = $mail;
+        $mail = $__;
+      } else {
+        $mail .= $_;
+        next;
+      }
+    }
+    $l++;
+    $n = 0;
+    if ($opt_C) {
+      for (my $i=$opt_C;$i;$i--) {
+        $C{$i} = $C{$i-1} if defined $C{$i-1};
+      }
+      $C{0} = [$l,$_];
+    }
+    if ($opt_e) {
+      if ($opt_v) {
+        next if &$egrep;
+      } else {
+        unless (&$egrep) {
+          if ($opt_C and $c) {
+            print "$l:" if $opt_n;
+            print;
+            $L{$l} = $l;
+            $c--;
+          }
+          next;
+        }
+      }
+      $n++;
+    } else {
+      if ($opt_v) {
+        # print ">>>$_" if $opt_i and /$exp/oi or /$exp/o;
+        if ($opt_Q) {
+          next if /$exp/m;
+        } else {
+          next if /$exp/om;
+        }
+        $n++;
+      } else {
+        if ($opt_c) {
+          if ($opt_Q) { $n++ while /$exp/mg }
+          else	      { $n++ while /$exp/omg }
+        } else {
+          if ($opt_o) {
+            if ($exp =~ /\([^?]+\)/) {
+              if (/$exp/) {
+                $n++;
+                $_ = "$1\n";
+              }
+            } else {
+              my $m = '';
+              while (s/($exp)//) {
+                $n++;
+                $m .= "$1\n";
+              }
+              $_ = $m;
+            }
+          } elsif ($opt_Q) {
+            $n += s/($exp)/$B$1$N/mg;
+          } else {
+            $n += s/($exp)/$B$1$N/omg;
+          }
+        }
+      }
+    }
+    unless ($n) {
+      if ($opt_C and $c) {
+        print "$l:" if $opt_n;
+        print;
+        $L{$l} = $l;
+        $c--;
+      }
+      next;
+    }
+    $found += $n;
+    # print " " x ($maxlen+9),"\r" if -t STDOUT and $found==1;
+    next if $opt_c;
+    last if $opt_l or $opt_L;
+    if ($file and not $opt_s) {
+      print "\n$B$file$N:\n";
+      $file = '';
+    }
+    if ($opt_x and $n) {
+      if ($opt_i) { s/($opt_x)/$B$1$N/ogi }
+      else        { s/($opt_x)/$B$1$N/og }
+    }
+    for (my $i=$opt_C;$i;$i--) {
+      if (defined $C{$i}) {
+        my ($ln,$ls) = @{$C{$i}};
+        unless (defined $L{$ln}) {
+          $L{$ln} = $ln;
+          print "$ln:" if $opt_n;
+          print $ls;
+        }
+      }
+    }
+    print "$l:" if $opt_n;
+    print;
+    $L{$l} = $l;
+    $c = $opt_C;
+  }
+
+  if ($opt_c) {
+    print "$file:" if @ARGV>1;
+    print "$found\n";
+  } else {
+    print "$file\n" if $opt_l and $found or $opt_L and not $found;
+  }
+  return $found;
+}

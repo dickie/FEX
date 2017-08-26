@@ -1,0 +1,124 @@
+#!/usr/bin/perl -w
+
+# send e-mail to all registered F*EX users
+#
+# Author: Ulli Horlacher <framstag@rus.uni-stuttgart.de>
+#
+
+use Getopt::Std;
+use File::Basename;
+use Cwd 'abs_path';
+
+# do not run as CGI!
+exit if $ENV{SCRIPT_NAME};
+
+unless ($ENV{FEXLIB}) {
+  if ($ENV{FEXHOME}) {
+    $ENV{FEXLIB} = $ENV{FEXHOME}.'/lib';
+  } else {
+    $ENV{FEXLIB} = dirname(dirname(abs_path($0))).'/lib';
+  }
+}
+$FEXLIB = $ENV{FEXLIB};
+die "$0: no FEXLIB\n" unless -f "$FEXLIB/fex.pp";
+
+# program name
+$0 =~ s:.*/::;
+
+# become effective user fex
+unless ($<) {
+  if (my @pw = getpwnam('fex')) {
+    $)         = $pw[3];
+    $>         = $pw[2];
+    $ENV{HOME} = $pw[7];
+  } else {
+    die "$0: no such user 'fex'\n";
+  }
+}
+
+# import from fex.pp
+our ($FEXHOME,$hostname,$sendmail,$spooldir,$admin,$bcc);
+
+# load common code, local config : $HOME/lib/fex.ph
+require "$FEXLIB/fex.pp" or die "$0: cannot load $FEXLIB/fex.pp - $!\n";
+
+die "$0: \$admin not configured in $FEXLIB/fex.ph\n"
+  if not $admin or $admin =~ /example.org/;
+
+$opt_h = 0;
+
+getopts('h') or usage(2);
+usage(0) if $opt_h;
+
+$subject = "@ARGV";
+die usage(1) unless $subject;
+
+local $/;
+$text = <STDIN>;
+die usage(1) unless $text;
+
+if (open my $sig,$ENV{HOME}.'/.signature') {
+  $text .= "\n-- \n" . <$sig>;
+  close $sig;
+}
+
+local $/ = "\n";
+
+chdir $spooldir or die "$0: $spooldir - $!\n";
+
+# @users = grep { chomp;s:/@:: } glob("*/@");
+foreach $user (glob("*@*")) {
+  if (-f "$user/@" and (readlink "$user/\@NOTIFICATION"||'') !~ /no/i) {
+    push @users,$user;
+  }
+}
+
+foreach $group (glob "*/\@GROUP/*") {
+  if (open $group,$group) {
+    while (<$group>) {
+      s/#.*//;
+      s/:.*\n//;
+      push @users,$_ if /@/;
+    }
+    close $group;
+  }
+}
+
+foreach $subuser (glob "*/\@SUBUSER") {
+  if (open $subuser,$subuser) {
+    while (<$subuser>) {
+      s/#.*//;
+      s/:.*\n//;
+      push @users,$_ if /@/;
+    }
+    close $subuser;
+  }
+}
+
+# @users = qw'framstag@fex';
+die "$0: no users found\n" unless @users or grep /@/,@users;
+push @users,$bcc;
+@users = uniq(@users);
+
+open $sendmail,'|-',$sendmail,@users or die "$0: $sendmail - $!\n";
+
+print {$sendmail}
+  "From: $admin\n",
+  "To: fexusers\@$hostname\n",
+  "Subject: $subject\n",
+  "\n",
+  $text;
+
+close $sendmail or die "$0: $sendmail - $!\n";
+print "mail sent to:\n",map { "$_\n" } @users;
+exit;
+
+sub uniq {
+  my %x;
+  grep !$x{$_}++,@_;
+}
+
+sub usage {
+  print "usage: $0 \"SUBJECT\" < mail.text\n";
+  exit shift||0;
+}

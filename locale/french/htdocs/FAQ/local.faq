@@ -1,0 +1,7 @@
+Q: Comment puis-je utiliser ma propre FAQ ?
+A: Placer votre FAQ dans le fichier /home/fex/htdocs/FAQ/local.faq et exécuter :
+
+   <code>
+   cd /home/fex/htdocs/FAQ
+   ln -sf local.html index.html
+   </code>

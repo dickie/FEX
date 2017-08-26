@@ -1,0 +1,59 @@
+New features for users
+----------------------
+
+2016-03-15:
+
+- recipient address can have attached :options (keep,autodelete,locale)
+
+
+2016-01-04:
+
+- new Windows client fexit
+
+- new MacOS client macfexsend
+
+
+
+2015-01-12:
+
+- user configuration: save-or-display (MIME) for download
+
+- fexsend has new option -S show server/user settings
+
+- fexsend has new option -N resend notification email
+
+
+2014-12-24:
+
+- the CLI clients respect the environment variables SSLVERIFY SSLVERSION
+  SSLCAPATH SSLCAFILE SSLCIPHERLIST to enhance HTTPS security
+
+- new $HOME/.fex/config for the CLI clients, you can set there the variables
+  $opt_* %autoview %alias
+  see "fexsend -H" and "fexget -H" for details
+
+- fexget autoviews images after download
+
+
+2014-08-06:
+
+- you as the sender can download the file, too, without auto-deleting it
+
+
+2014-03-05:
+
+- email enryption option: you can upload your PGP/GPG public key
+  via "user config & operation control" and "Manage e-mail encryption"
+
+- fexget checks local storage capacity before download
+
+- new FAQ http://fex.rus.uni-stuttgart.de/FAQ/
+
+- notification e-mail resend option via "user config & operation control"
+
+
+2013-08-05:
+
+- allow multiple downloads from same ip
+
+- fexget proxy support

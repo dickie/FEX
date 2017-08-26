@@ -1,0 +1,239 @@
+#!/usr/bin/perl -w
+
+use File::Basename;
+use Cwd 'abs_path';
+use I18N::Langinfo qw'langinfo CODESET';
+
+# add fex lib
+unless ($FEXLIB = $ENV{FEXLIB}) {
+  if ($ENV{FEXHOME}) {
+    $FEXLIB = $ENV{FEXHOME}.'/lib';
+  } elsif (-f '/usr/share/fex/lib/fex.ph') {
+    $FEXLIB = '/usr/share/fex/lib';
+  } else {
+    $FEXLIB = dirname(dirname(abs_path($0))).'/lib';
+  }
+  $ENV{FEXLIB} = $FEXLIB;
+}
+die "$0: no $FEXLIB\n" unless -d $FEXLIB;
+
+# import from fex.pp
+our (@logdir,$spooldir,$debug);
+
+# load common code, local config : $HOME/lib/fex.ph
+require "$FEXLIB/fex.pp" or die "$0: cannot load $FEXLIB/fex.pp - $!\n";
+
+$CTYPE = langinfo(CODESET());
+binmode(STDOUT,":encoding($CTYPE)");
+
+$log = shift || $logdir[0].'/fexsrv.log';
+
+$ignore = join('|',qw(
+  (CONNECT|CONTINUE).*(crawl|msnbot|obertux)
+  DISCONNECT:.no.HTTP.request
+  GET.*(favicon|robots\.txt)
+  GET./organization\.gif
+  GET./small_logo\.jpg
+  GET./logo\.jpg
+  GET./action-fex-camel\.gif
+  GET./fup\?showstatus
+  GET./FAQ/faq\.css
+  GET./FAQ/jquery\.js
+  GET.*Arrow\.gif
+  GET./apple-touch
+  GET./browserconfig\.xml
+  User-Agent:.*(Webnote|FeedFetcher|\w+bot|bot/|Website.Watcher|crawler|spider|searchme|Yandex|Slurp|ScoutJet|findlinks|urlmon|nagios)
+  User-Agent:.fnb.*quak
+  User-Agent:.Google.favicon
+  From:.*(msnbot|yandex|googlebot|webcrawler)
+  Referer:.*sex.*stream
+  Referer:.*stream.*sex
+  X-.*prefetch
+  X-Purpose:.preview
+));
+
+@weed = qw(
+  .*keep-alive
+  .*no-cache
+  Connection:
+  Cache-Control:
+  Content-Type:
+  Accept
+  TE:
+  UA-CPU:
+  Pragma:
+  DNT:
+  Via:
+  profile:
+  Upgrade-Insecure-Requests:
+  if-modified-since
+  Surrogate-Capability
+  Proxy-Authorization
+  http\.
+  Device-Stock
+  NOKIA_
+  GPRS
+  X-Proxy-ID
+  X-Moz
+  X.Wap
+  X-FH
+  X-FB
+  X-WS
+  X-Nokia
+  X-UCBrowser
+  X-NSN
+  X-OperaMini
+  x-Device
+  x-source-id
+  x.up
+  X-Behavioral
+  X-Do-Not-Track
+  X-\S*Via
+  x-Mobile
+  X-Country
+  X-ClickOnceSupport
+  X-Newrelic
+  X-IMForwards
+  X-Clearswift
+  X-MDS
+  .*:\s*$
+);
+
+$/ = "\n\n";
+$| = 1;
+
+if (-t STDIN or $ENV{GATEWAY_INTERFACE}) {
+  open L,$log or die "$0: $log - $!\n";
+  seek L,0,2;
+} else {
+  *L = *STDIN;
+}
+# binmode(L,":encoding(UTF-8)");
+
+for (;;) {
+  while (<L>) {
+    next if /(^|\n)($ignore)/i;
+    s/[\x00-\x08\x0B-\x1F\x1F\x80-\x9F]/_/g;
+    s/^\n//;
+    foreach $weed (@weed) {
+      while (s/\n$weed.*\n/\n/i) {}
+    }
+    $post = /\nPOST\s/;
+    if (/^\n*(CONNECT|CONTINUE).*\s\[([\d_]+)\]/i) { $pid = $2 }
+    if (/\n(POST|GET)\s+(\S+)/i) {
+      $cgi = $2;
+      $cgi =~ s:.*/::;
+      $cgi =~ s:\?.*::;
+    }
+    if (/Content-Length: (\d+)/i) {
+      $d = $1;
+      while ($d =~ s/(\d)(\d\d\d\b)/$1,$2/) {};
+      s/Content-Length: \d+/Content-Length: $d/i;
+    }
+    s/[\s\n]*$/\n\n/;
+    print or exit;
+    $from = '';
+    if (m:\nGET /fup/(\w{40,}):) {
+      $_ = decode_b64($1);
+      printf "  FROM=\"%s\"\n\n",$1 if /from=([\w\@.-]+)/;
+    } elsif (m:\nGET /fop/(\w+)/:) {
+      $dkey = $1;
+      my $ddir = "$spooldir/.dkeys/$dkey";
+      $_ = readlink $ddir or next;
+      (undef,$to,$from) = split('/');
+      printf "  FROM=\"%s\"\n",$from;
+      printf "  TO=\"%s\"\n",$to;
+      $cgi = '';
+      if ($comment = slurp("$ddir/comment")) {
+        printf "  COMMENT=\"%s\"\n",utf8decode($comment)||'';
+      }
+      if (not -f "$ddir/data" and $_ = slurp("$ddir/error")) {
+        s/\n.*//s;
+        print "  ERROR=\"$_\"\n";
+      }
+      elsif ($size = -s "$ddir/data") {
+        printf "  SIZE=%s MB\n",int($size/1024/1024);
+      }
+      print "\n";
+    } elsif (m:\nGET /fup.*skey=(\w+):) {
+      read_skey($1);
+      print "\n";
+    }
+    if ($debug and $pid and $post) {
+      &read_debug_log;
+    };
+    $pid = $cgi = '';
+  }
+  sleep 1;
+}
+
+
+sub read_debug_log {
+  my (@log,$log);
+  local $/ = "\n";
+  local $_;
+  # https://rt.cpan.org/Public/Bug/Display.html?id=88592
+  # local $^W;
+  # no warnings "all";
+  no warnings 'utf8';
+
+  for (1..2) {
+    sleep 1;
+    @log = `ls -rt $logdir[0]/.debug/*_${pid}.$cgi 2>/dev/null`;
+    if ($log = $log[-1] and open $log,$log) {
+      binmode($log,":utf8");
+      while (<$log>) {
+        s/\r//;
+        s/[^\x09\x20-\xFF]/_/g;
+        if (/^Content-Disposition:.*name="FILE".*filename="(.+)"/i) {
+          print "  FILE=\"$1\"\n";
+        } elsif (/^Content-Disposition:.*name="(\w+)"/i) {
+          my $p = uc($1);
+          $_ = <$log>;
+          my $v = <$log>||'';
+          $v =~ s/[\r\n]+//;
+          if ($v) {
+            my $vv = utf8decode($v)||$v;
+            $vv =~ s/[\x00-\x1F]/_/g;
+            $vv =~ s/[\x80-\x9F]/_/g;
+            printf "  %s=\"%s\"\n",$p,$vv;
+            read_akey($v) if $p eq 'AKEY';
+            read_skey($v) if $p eq 'SKEY';
+          }
+        } elsif (/^(Param|Exp): (\w+=".+")/) {
+          print "  $2\n";
+        }
+      }
+      close $log;
+      print "\n";
+      return;
+    }
+  }
+}
+
+sub read_akey {
+  my $akey = "$spooldir/.akeys/" . shift;
+  if (my $user = readlink($akey)) {
+    $user =~ s:../::;
+    printf "  USER=\"%s\"\n",$user;
+  }
+}
+
+
+sub read_skey {
+  my $skey = "$spooldir/.skeys/" . shift;
+  if (open $skey,$skey) {
+    while (<$skey>) {
+      printf "  FROM=\"%s\"\n",$1 if /from=(.+)/;
+      printf "  TO=\"%s\"\n",$1   if /to=(.+)/;
+    }
+    close $skey;
+  }
+}
+
+
+sub utf8decode {
+  local $_ = shift;
+  s/([\xC0-\xDF])([\x80-\xBF])/chr(ord($1)<<6&0xC0|ord($2)&0x3F)/eg;
+  return $_;
+}

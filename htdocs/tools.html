@@ -1,0 +1,73 @@
+<HTML>
+<HEAD><TITLE>F*EX tools</TITLE></HEAD>
+<BODY>
+<center></center>
+<h1> <a href="/">F*EX</a> tools</h1>
+
+<<$ENV{TA} = 'http://fex.belwue.de';'';>>
+
+#if $ENV{AKEY}
+To use one of the following F*EX clients you must configure them.
+See <a href="/foc">user config</a> for your account data.
+<p>
+#endif
+
+<h3>UNIX:</h3>
+<table border=1>
+<tr><td><a href="/download/fexsend">fexsend</a>
+    <td>client for sending files (with many
+        <a href="$TA$/fstools/fexsend.html">
+        additional features</a>)</tr>
+<tr><td><a href="/download/fexget">fexget</a>
+    <td>client for receiving files (with many
+        <a href="$TA$/fstools/fexget.html">
+        additional features</a>)</tr>
+<tr><td><a href="/download/sex.tar">sexsend, sexget</a>
+    <td>clients for sending and receiving streams</tr>
+</table>
+<p>
+<h3>Windows:</h3>
+<table border=1>
+<!--
+<tr><td><a href="$TA$/download/schwuppdiwupp.exe">schwuppdiwupp</a>
+    <td>GUI client for sending files</tr>
+<tr><td><a href="$TA$/download/fexget.exe">fexget</a>
+    <td>client for receiving files
+-->
+<tr><td><a href="/fexit.html">fexit</a>
+    <td>client for sending and receiving files
+</table>
+<p>
+<h3>Macintosh:</h3>
+<table border=1>
+<tr><td><a href="/macfexsend.html">fexsend.command</a>
+    <td>client for sending files and directories</tr>
+</table>
+<p>
+In opposite to many web browsers all these clients can handle files
+or directories greater than 2 GB and are able to resume interrupted
+up/downloads.
+<p>
+Hint for UNIX users:
+<pre>  wget -qO- http://$HTTP_HOST$/xx.tar | tar xvf -</pre>
+installs fexsend, fexget and
+<a href="http://fex.rus.uni-stuttgart.de/usecases/xx.html">xx</a>.
+<pre>  wget -qO- http://$HTTP_HOST$/afs.tar | tar xvf -</pre>
+also installs the client programs for
+<a href="$TA$/SEX.html">Stream EXchange</a> and
+<<
+  my $a = "/usecases/anonymous.html";
+  print "<a href=\"";
+  print "http://fex.rus.uni-stuttgart.de" unless -s "$docdir$a";
+  print "$a\">anonymous usage</a>";
+>>
+## <hr>
+## <pre>
+## <<
+##  #while (($v,$vv) = each %ENV) { printf "%s = %s\n",$v,$vv if $vv !~ /\n/ }
+##  #foreach $v (qw'AKEY USER ID') { printf "$v = %s\n",$ENV{$v} }
+##  '';
+## >>
+## </pre>
+</BODY>
+</HTML>

@@ -1,0 +1,65 @@
+<html>
+<head>
+  <title>fexsend for Mac</title>
+  <style>
+    pre {
+      padding: 8px;
+      background: #eef;
+      border: thin dashed #0076A3;
+      font-family: courier;
+    }
+  </style>
+</head>
+<body>
+
+<h1>fexsend for Apple Macintosh OS X</h1>
+
+fexsend is a <a href="/index.html">F*EX</a> client for sending files of
+any size to any e-mail address.<br>
+fexsend can also send directories and resume the upload
+after a link failure, which your webbrowser cannot do.
+
+<h3>To install fexsend:</h3>
+<ol>
+<li> start a "Terminal":<br>
+     go to <mark>Finder</mark>, press &#8679;&#8984;U to open the Utility
+     Application folder and double-click <mark>Terminal.app</mark> with left
+     mouse button
+<p>
+<li> copy this code into the Terminal window:
+     <pre>curl http://fex.belwue.de/download/fexsend.command|bash</pre>
+     Do not forget to enter [RETURN]
+     <p>
+     You can use your mouse for copying:
+     <p>
+     <ol>
+       <li>move your mouse cursor with hold left mouse button over the
+           code obove (the code will be marked)
+       <li>press &#8984;C
+       <li>move your mouse cursor into the Terminal window
+       <li>click left mouse button
+       <li>press &#8984;V
+     </ol>
+</ol>
+
+<h3>To run fexsend:</h3>
+<ol>
+  <li> in <mark>Finder</mark> click <mark>Desktop</mark> with left mouse button
+  <li> double-click <mark>fexsend.command</mark> with left mouse button
+</ol>
+<p>
+<<
+  if ($ENV{ID}) {
+    my $url = "$ENV{PROTO}://$ENV{HTTP_HOST}/fup/"
+            . ::b64("from=$ENV{USER}&id=$ENV{ID}");
+    qq(
+      When asked for "F*EX server URL" enter:
+      <p>
+      <code>$url</code>
+      <p>
+      (again, use your mouse for copy+paste)
+    );
+  }
+>>
+</body>
+</html>
