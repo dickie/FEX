@@ -30,8 +30,5 @@ if you want.
 
 See directory doc for more information.
 
-If you have comments, suggestions, requests, etc, send me an e-mail:
-framstag@rus.uni-stuttgart.de
-
 Or fex some nice, funny, interesting videos (eg cute pets) to this address :-)
 
